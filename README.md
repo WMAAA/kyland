@@ -146,7 +146,7 @@ ros2 launch buildmap mapping.launch.py
 
 # 2025/01/08
 
-> 今天先做一下livox avia自带的imu的内外参。
+> 今天先做一下livox avia自带的imu的内外参。然后下午调研一下
 
 通过读avia的使用手册可以知道，内置的IMU的型号为[BMI088](https://www.bosch-sensortec.com/products/motion-sensors/imus/bmi088/)，
 
@@ -217,3 +217,53 @@ IMU测量方程：[惯性导航 | 测量方程中的噪声模型与离散时间�
 
 - ROS1
 - [imu_utils](https://github.com/gaowenliang/imu_utils)
+  - 还是用我的ubuntu20.04好用
+
+### 录制rosbag
+
+```
+rosbag record -o imu_data.bag /livox/imu
+```
+
+### 标定内参
+
+1.编写launch文件，在 imu_utils 下的 launch 文件夹中创建 imu_test.launch，其实复制一个launch改个名字，把里面需要填的数据填一下即可，不用自己动手一个
+
+个输入：
+
+```
+<launch>
+    <node pkg="imu_utils" type="imu_an" name="imu_an" output="screen">
+        <param name="imu_topic" type="string" value= "/livox/imu"/>
+        <param name="imu_name" type="string" value= "avia_imu"/>
+        <param name="data_save_path" type="string" value= "$(find imu_utils)/"/>
+        <param name="max_time_min" type="int" value= "120"/>
+        <param name="max_cluster" type="int" value= "100"/>
+    </node>
+</launch>
+```
+
+2.运行 imu_test.launch 文件
+
+```
+roslaunch imu_utils avia.launch
+```
+
+3.播放录制的包
+
+```
+rosbag play -r 100 ./data/imu_data.bag
+```
+
+等包播放完，终端会显示
+
+![image-20250108163719774](assets/image-20250108163719774.png)
+
+![image-20250108163732161](assets/image-20250108163732161.png)
+
+现在程序开始标定了，结束后到保存的位置，找到相对应自己imu名字的yaml文件，标定数据在里面，如下：
+
+![image-20250108164117240](assets/image-20250108164117240.png)
+
+![image-20250108164202096](assets/image-20250108164202096.png)
+
