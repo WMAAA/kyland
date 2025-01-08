@@ -146,7 +146,11 @@ ros2 launch buildmap mapping.launch.py
 
 # 2025/01/08
 
-> 今天先做一下livox avia自带的imu的内外参。然后下午调研一下
+> 今天上午先查了一些livox avia相关资料，自带的imu资料，内外参。
+>
+> 然后下午标定了一下imu内参，但是相比于配置文件要小很多，问了gpt说太小就更信任imu，大一点鲁棒性更好
+>
+> 看了半篇综述，晚上回去做一下思维导图，搜了一篇关于占据栅格网络的文献，明天看一下
 
 通过读avia的使用手册可以知道，内置的IMU的型号为[BMI088](https://www.bosch-sensortec.com/products/motion-sensors/imus/bmi088/)，
 
