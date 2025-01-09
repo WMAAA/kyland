@@ -271,3 +271,128 @@ rosbag play -r 100 ./data/imu_data.bag
 
 ![image-20250108164202096](assets/image-20250108164202096.png)
 
+# 2025/01/09
+
+> 今天有点摆烂，上午装了一上午wifi驱动
+
+## 网卡驱动
+
+tenda ax300，直接去官网下载驱动，上午的驱动进bios，将安全模式关闭就可以安装了，还好没有瞎搞弄内核版本。。。新的wifi就是快，之前还以为是公司网络的问题呢。
+
+## 修改雷达驱动
+
+imu频率影响slam精度和鲁棒性，让我找一下为啥`livox_ros2_driver`跑出来的imu频率有问题，问题如下：
+
+imu用topic hz查，是50hz，录bag包，显示是10hz
+
+![image-20250109153747622](assets/image-20250109153747622.png)
+
+### 版本一
+
+加入线程相关函数，修改文件，**失败**，cpu占用率100
+
+![image-20250109154018866](assets/image-20250109154018866.png)
+
+### 版本二
+
+版本也不对，虽然看着正常，但是随着时间越长，频率越来越低，误差越来越大，长时间运行不行
+
+![image-20250109161443068](assets/image-20250109161443068.png)
+
+### 版本三
+
+手动进行imu间隔时间的设置，直接每次读取当前时间，等到指定的间隔时间
+
+代码如下
+
+```
+void Lddc::PollingLidarImuData(uint8_t handle, LidarDevice *lidar) {
+  // 获取激光雷达设备的IMU数据队列
+  LidarDataQueue *p_queue = &lidar->imu_data;
+  
+  // 如果IMU数据队列为空，则直接返回
+  if (p_queue->storage_packet == nullptr) {
+    return;
+  }
+
+  // 设置目标轮询间隔为5ms，意味着希望以200Hz的频率处理IMU数据
+  const auto target_interval = std::chrono::microseconds(5000); // 200Hz = 5ms
+  
+  // 获取当前时间作为轮询开始时间
+  auto next_time = std::chrono::steady_clock::now();
+
+  // 如果IMU线程正在运行，进入循环进行数据处理
+  while (imu_thread_running_[handle]) {
+    // 如果IMU数据队列不为空，发布IMU数据
+    if (!QueueIsEmpty(p_queue)) {
+      PublishImuData(p_queue, 1, handle);
+    }
+
+    // 控制轮询间隔，确保下一次处理的时间间隔为5ms
+    next_time += target_interval;
+    
+    // 使当前线程休眠，直到指定的时间点，精确控制轮询频率
+    std::this_thread::sleep_until(next_time);
+  }
+}
+
+void Lddc::DistributeLidarData(void) {
+  // 检查Lidar数据集合是否为空，如果为空则退出
+  if (lds_ == nullptr) {
+    return;
+  }
+
+  // 等待信号量，保证该操作的线程同步
+  lds_->semaphore_.Wait();
+
+  // 遍历所有的激光雷达设备
+  for (uint32_t i = 0; i < lds_->lidar_count_; i++) {
+    uint32_t lidar_id = i;
+    
+    // 获取当前激光雷达设备的指针
+    LidarDevice *lidar = &lds_->lidars_[lidar_id];
+    
+    // 获取该激光雷达设备的数据队列
+    LidarDataQueue *p_queue = &lidar->data;
+    
+    // 如果设备未连接或数据队列为空，跳过该设备
+    if ((kConnectStateSampling != lidar->connect_state) || (p_queue == nullptr)) {
+      continue;
+    }
+
+    // 调用函数处理该激光雷达的数据（点云数据）
+    PollingLidarPointCloudData(lidar_id, lidar);
+
+    // 启动或保持IMU数据的轮询线程
+    std::lock_guard<std::mutex> lock(imu_thread_mutex_);  // 确保线程安全
+    if (!imu_thread_running_[lidar_id]) {
+      // 如果该激光雷达的IMU线程未启动，则启动新的线程
+      imu_thread_running_[lidar_id] = true;
+
+      // 创建IMU轮询线程
+      std::thread imu_thread([this, lidar_id, lidar]() {
+        // 在该线程中轮询IMU数据，直到IMU线程被停止
+        while (imu_thread_running_[lidar_id]) {
+          PollingLidarImuData(lidar_id, lidar);  // 调用PollImuData处理IMU数据
+        }
+      });
+
+      // 分离线程，线程将在后台运行
+      imu_thread.detach();
+    }
+  }
+
+  // 如果接收到退出请求，则停止所有IMU线程并准备退出
+  if (lds_->IsRequestExit()) {
+    for (uint32_t i = 0; i < lds_->lidar_count_; i++) {
+      imu_thread_running_[i] = false; // 停止所有IMU线程
+    }
+    // 调用退出准备函数
+    PrepareExit();
+  }
+}
+```
+
+修改后的效果
+
+![image-20250109162811366](assets/image-20250109162811366.png)
