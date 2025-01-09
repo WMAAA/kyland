@@ -398,3 +398,256 @@ void Lddc::DistributeLidarData(void) {
 修改后的效果
 
 ![image-20250109162811366](assets/image-20250109162811366.png)
+
+## 读雷达驱动相关
+
+### 主要流程
+
+`livox_ros2_driver.cpp`文件最后，注册了一个 ROS 2 节点，允许它作为一个组件节点运行。
+
+```
+#include <rclcpp_components/register_node_macro.hpp>
+
+RCLCPP_COMPONENTS_REGISTER_NODE(livox_ros::LivoxDriver)
+```
+
+去看构造函数
+
+```
+LivoxDriver::LivoxDriver(const rclcpp::NodeOptions & node_options)
+```
+
+`GetInstance`函数，设置了间隔时间，单位为ms
+
+`InitLdsLidar`中说了，如果白名单中没有广播码的话，使用自动连接
+
+其实很多代码都没有用，都是if，else，判断，else都没执行，因为是直接连接雷达。
+
+然后就进入了多线程
+
+```
+  poll_thread_ = std::make_shared<std::thread>(&LivoxDriver::pollThread, this);
+```
+
+然后，用于在一个独立的线程中持续处理 LiDAR 数据的分发
+
+```
+void LivoxDriver::pollThread()
+{
+  std::future_status status;
+
+  do {
+    lddc_ptr_->DistributeLidarData();
+    status = future_.wait_for(std::chrono::seconds(0));
+  } while (status == std::future_status::timeout);
+}
+```
+
+具体来说就是调用`DistributeLidarData`函数，这个就是在`lddc`中，雷达和imu分开发的？，在这个函数中遍历所有的`lidar`，然后分别处理点云和imu数据，`PollingLidarPointCloudData`和`PollingLidarImuData`
+
+因为`imu`的函数我已经修改过了，所以主要看处理雷达点云数据的函数
+
+```
+void Lddc::PollingLidarPointCloudData(uint8_t handle, LidarDevice *lidar) {
+  // 获取 LiDAR 设备的存储数据队列
+  LidarDataQueue *p_queue = &lidar->data;
+
+  // 如果数据队列的存储空间为空，直接返回
+  if (p_queue->storage_packet == nullptr) {
+    return;
+  }
+
+  // 循环直到队列为空或队列中数据不足以发布一次数据包
+  while (!QueueIsEmpty(p_queue)) {
+    uint32_t used_size = QueueUsedSize(p_queue);  // 获取当前队列中使用的数据量
+    uint32_t onetime_publish_packets = lidar->onetime_publish_packets;  // 每次发布的数据包数量
+
+    // 如果当前队列中的数据不足以发布一次数据包，则退出循环
+    if (used_size < onetime_publish_packets) {
+      break;
+    }
+
+    // 根据不同的传输格式发布数据
+    if (kPointCloud2Msg == transfer_format_) {
+      // 如果传输格式为 PointCloud2 消息类型，调用 PublishPointcloud2 函数发布数据
+      PublishPointcloud2(p_queue, onetime_publish_packets, handle);
+    } else if (kLivoxCustomMsg == transfer_format_) {
+      // 如果传输格式为 Livox 自定义消息类型，调用 PublishCustomPointcloud 函数发布数据
+      PublishCustomPointcloud(p_queue, onetime_publish_packets, handle);
+    } else if (kPclPxyziMsg == transfer_format_) {
+      // 如果传输格式为 PCL 的 PXZ/ZI 数据类型，调用 PublishPointcloudData 函数发布数据
+      PublishPointcloudData(p_queue, onetime_publish_packets, handle);
+    }
+  }
+}
+```
+
+因为我要用的是`PublishCustomPointcloud`，
+
+看完以后觉得是这俩参数的问题
+
+- `onetime_publish_packets`，每秒的点除以每个包的数量
+
+```
+    p_lidar->onetime_publish_packets = \
+        GetPacketNumPerSec(p_lidar->info.type, \
+        p_lidar->raw_data_type) * buffer_time_ms_ / 1000;
+```
+
+- `packet_interval_max`
+
+  ```
+    int64_t packet_gap = timestamp - last_timestamp;
+  
+    if ((packet_gap > lidar->packet_interval_max) &&
+  
+  ​    lidar->data_is_pubulished) {
+  ```
+
+  
+
+### PublishCustomPointcloud
+
+1. 如果无法获取起始时间，或者队列中的数据包数量不足，则返回 `0`
+
+2. 创建并初始化消息结构体
+
+   ```
+     livox_interfaces::msg::CustomMsg livox_msg;
+     livox_msg.header.frame_id.assign(frame_id_);
+     livox_msg.timebase = 0;
+     livox_msg.point_num = 0;
+     livox_msg.lidar_id = handle;
+   ```
+
+3. 获取lidar参数并初始化数据缓冲区，这里我看到了`GetPointInterval`函数
+
+   ```
+     uint8_t point_buf[2048];
+     uint8_t data_source = lds_->lidars_[handle].data_src;
+     uint32_t line_num = GetLaserLineNumber(lidar->info.type);
+     uint32_t echo_num = GetEchoNumPerPoint(lidar->raw_data_type);
+     uint32_t point_interval = GetPointInterval(lidar->info.type);
+     uint32_t published_packet = 0;
+     uint32_t packet_offset_time = 0;  /** uint:ns */
+     uint32_t is_zero_packet = 0;
+   ```
+
+4. 循环处理
+
+   ```
+   while (published_packet < packet_num) {
+   ```
+
+   ```
+   从队列中获取数据包：
+   QueuePrePop(queue, &storage_packet) 从队列中取出一个数据包。
+   raw_packet 通过 reinterpret_cast 将原始数据转换为 LivoxEthPacket 指针。
+   timestamp 获取当前数据包的时间戳。
+   时间间隔检查：
+   计算当前数据包与上一个数据包之间的时间差（packet_gap）。
+   如果时间差超过最大允许时间间隔，并且数据已经发布过，则调整时间戳并将数据包置为空（ZeroPointDataOfStoragePacket），并设置 is_zero_packet 为 1，表示当前包是一个零数据包。
+   ```
+
+   思考一下影响雷达信息发布的频率的因素：
+
+   - **`timestamp` 与 `last_timestamp`**：在 `PublishCustomPointcloud` 中，`timestamp` 和 `last_timestamp` 控制了每个数据包发布的时间间隔。如果相邻两个数据包的时间间隔超过了预设的最大时间间隔 `lidar->packet_interval_max`，则会调整时间戳并可能丢弃一些点数据，以控制数据发布的频率。
+   - **时间间隔的计算**：`packet_gap` 是当前数据包与上一个数据包时间戳的差值，控制了发布的时间间隔。如果时间间隔过大，数据会被调整或丢弃（`ZeroPointDataOfStoragePacket`）。
+   - **`packet_interval_max`**：这个参数是用于调整每个 LiDAR 数据包的最大间隔，用来避免发布的频率过高。
+
+   - **`lidar->onetime_publish_packets`**：控制每次发布的数据包数量，间接影响了发布频率。每次发布的点云包数越多，发布的频率会相对降低。
+   - **`lidar->packet_interval_max` 和 `lidar->packet_interval`**：这些参数限制了数据包之间的最大时间间隔和理想的时间间隔，它们直接影响到每秒钟发布的数据量
+
+   
+
+5. 处理第一个数据包为当前时间戳，后续的数据包设置为偏移量
+
+   ```
+       /** first packet */
+       if (!published_packet) {
+         livox_msg.timebase = timestamp;
+         packet_offset_time = 0;
+         /** convert to ros time stamp */
+         livox_msg.header.stamp = rclcpp::Time(timestamp);
+       } else {
+         packet_offset_time = (uint32_t)(timestamp - livox_msg.timebase);
+       }
+       uint32_t single_point_num = storage_packet.point_num * echo_num;
+   ```
+
+6. 点云数据转换与填充消息
+
+7. 更新队列并准备下一包
+
+8. 发布消息到 ROS
+
+
+
+### GetPointInterval
+
+内联函数 `GetPointInterval`，它根据 `product_type` 返回该产品类型对应的点间隔 (`point_interval`)
+
+```
+inline uint32_t GetPointInterval(uint32_t product_type) {
+  return product_type_info_pair_table[product_type].point_interval;
+}
+```
+
+`product_type_info_pair_table`
+
+```
+const ProductTypePointInfoPair product_type_info_pair_table[kMaxProductType] = {
+    {100000, 10000, 1},
+    {100000, 10000, 1},
+    {240000, 4167 , 6}, /**< tele */
+    {240000, 4167 , 6},
+    {100000, 10000, 1},
+    {100000, 10000, 1},
+    {100000, 10000, 1}, /**< mid70 */
+    {240000, 4167,  6},
+    {240000, 4167,  6},
+};
+```
+
+```
+typedef struct {
+  uint32_t points_per_second; /**< number of points per second 每秒钟多少个点 */
+  uint32_t point_interval;    /**< unit:ns 相邻两点的时间间隔 */
+  uint32_t line_num;          /**< laser line number */
+} ProductTypePointInfoPair;
+```
+
+### FillPointsToCustomMsg
+
+主要是这个时间戳的设置，
+
+```
+      point.offset_time = offset_time + i * point_interval;
+```
+
+数据包offset_time，其中的第i个点，累积多个数据包
+
+```
+void Lddc::FillPointsToCustomMsg(livox_interfaces::msg::CustomMsg& livox_msg, \
+    LivoxPointXyzrtl* src_point, uint32_t num, uint32_t offset_time, \
+    uint32_t point_interval, uint32_t echo_num) {
+  LivoxPointXyzrtl* point_xyzrtl = (LivoxPointXyzrtl*)src_point;
+  for (uint32_t i = 0; i < num; i++) {
+    livox_interfaces::msg::CustomPoint point;
+    if (echo_num > 1) { /** dual return mode */
+      point.offset_time = offset_time + (i / echo_num) * point_interval;
+    } else {
+      point.offset_time = offset_time + i * point_interval;
+    }
+    point.x = point_xyzrtl->x;
+    point.y = point_xyzrtl->y;
+    point.z = point_xyzrtl->z;
+    point.reflectivity = point_xyzrtl->reflectivity;
+    point.tag = point_xyzrtl->tag;
+    point.line = point_xyzrtl->line;
+    ++point_xyzrtl;
+    livox_msg.points.push_back(point);
+  }
+}
+```
+
