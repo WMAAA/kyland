@@ -275,7 +275,9 @@ rosbag play -r 100 ./data/imu_data.bag
 
 > 今天有点摆烂，上午装了一上午wifi驱动
 >
-> 下午修改雷达驱动，雷达的imu消息有问题，最后修改完成后，我试的avia雷达消息正常，但是塔吊现场雷达得lidar消息有点慢
+> 下午修改雷达驱动，雷达的imu消息有问题，最后修改完成后，我试的avia雷达消息正常，但是塔吊现场雷达得lidar消息有点慢，只有6hz左右。
+>
+> 最后稍微读了一下雷达驱动流程，还没有解决问题。
 
 ## 网卡驱动
 
@@ -651,3 +653,455 @@ void Lddc::FillPointsToCustomMsg(livox_interfaces::msg::CustomMsg& livox_msg, \
 }
 ```
 
+# 2025/01/10
+
+> 今天整的事情大致如下：
+>
+> 1. 修改雷达驱动，根据[github思路](https://github.com/Livox-SDK/livox_ros2_driver/issues/39)修改`FillPointsToCustomMsg`函数
+> 2. 跑一下`egoplanner`或`fastplanner`，看一下大致思路？
+> 3. 速通那个占据网络概述，最好能跑一个开源框架的demo
+
+## FillPointsToCustomMsg
+
+简单的修改了一下，但是，塔吊现场的雷达，没有区别。
+
+## 复现ego-planner
+
+[源码地址](https://github.com/ZJU-FAST-Lab/ego-planner)
+
+编译报错
+
+```
+CMake Error at /opt/ros/noetic/share/cv_bridge/cmake/cv_bridgeConfig.cmake:113 (message):
+  Project 'cv_bridge' specifies '/usr/local/include/opencv' as an include
+  dir, which is not found.  It does neither exist as an absolute directory
+  nor in '${{prefix}}//usr/local/include/opencv'.  Check the issue tracker
+  'https://github.com/ros-perception/vision_opencv/issues' and consider
+  creating a ticket if the problem has not been reported yet.
+Call Stack (most recent call first):
+  /opt/ros/noetic/share/catkin/cmake/catkinConfig.cmake:76 (find_package)
+  planner/plan_env/CMakeLists.txt:12 (find_package)
+```
+
+由于我是ros1和ros2同时装，[问题解决](https://blog.csdn.net/Xjsdhwdma/article/details/135274908)
+
+## 读综述
+
+云里雾里的，都是专业名词，看的头疼，打算直接问chat
+
+[Occ感知自动驾驶 Occupany network占用预测网络](https://blog.csdn.net/weixin_57950978/article/details/140355306)
+
+[OccNet栅格占据网络](https://blog.csdn.net/Evelynnzhao/article/details/137427941)                                          
+
+[Occ3D知乎论文介绍](https://zhuanlan.zhihu.com/p/634770039)                                            [Occ3D源码地址](https://tsinghua-mars-lab.github.io/Occ3D/)
+
+## 复现
+
+# 2025/01/13
+
+> - 先看了一下首帧重力初始化怎么搞。结果源码已经搞过了
+> - 想看一下buildmap代码，看如何加入的后端。ps：现在看了一部分
+> - 目前还是雷达驱动有问题，达不到10hz
+
+## 首帧重力对齐
+
+参考链接[FASTLIO2_SAM_LC](https://github.com/liangheming/FASTLIO2_SAM_LC)
+
+`IMU_init`函数中有重力初始化呀，就是累积求平均值，然后作为重力的方向。
+
+```
+  for (const auto &imu : meas.imu)
+  {
+    const auto &imu_acc = imu->linear_acceleration;
+    const auto &gyr_acc = imu->angular_velocity;
+    cur_acc << imu_acc.x, imu_acc.y, imu_acc.z;
+    cur_gyr << gyr_acc.x, gyr_acc.y, gyr_acc.z;
+
+    mean_acc      += (cur_acc - mean_acc) / N;
+    mean_gyr      += (cur_gyr - mean_gyr) / N;
+
+    cov_acc = cov_acc * (N - 1.0) / N + (cur_acc - mean_acc).cwiseProduct(cur_acc - mean_acc) * (N - 1.0) / (N * N);
+    cov_gyr = cov_gyr * (N - 1.0) / N + (cur_gyr - mean_gyr).cwiseProduct(cur_gyr - mean_gyr) * (N - 1.0) / (N * N);
+
+    // cout<<"acc norm: "<<cur_acc.norm()<<" "<<mean_acc.norm()<<endl;
+
+    N ++;
+  }
+  state_ikfom init_state = kf_state.get_x();
+  init_state.grav = S2(- mean_acc / mean_acc.norm() * G_m_s2);
+  
+  //state_inout.rot = Eye3d; // Exp(mean_acc.cross(V3D(0, 0, -1 / scale_gravity)));
+  init_state.bg  = mean_gyr;
+  init_state.offset_T_L_I = Lidar_T_wrt_IMU;
+  init_state.offset_R_L_I = Lidar_R_wrt_IMU;
+  kf_state.change_x(init_state);
+```
+
+使用正则表达式，找S2函数调用![image-20250113113055439](assets/image-20250113113055439.png)
+
+![image-20250113110830114](assets/image-20250113110830114.png)
+
+[嘿嘿，好用](https://blog.csdn.net/Dontla/article/details/129289224)
+
+## loop closure思路
+
+发现了一个好东西，**[SLAM-application](https://github.com/engcang/SLAM-application)**集合了各种激光slam方案，
+
+## 源码和修改版区别
+
+| `updatePath`                | 更新里程计轨迹，四元数轨迹位姿                               |
+| --------------------------- | ------------------------------------------------------------ |
+| `transformPointCloud`       | `T_w_lidar  =  T_w_b * T_b_lidar`雷达到世界坐标系，点云都变换过去 |
+| `transformPointCloudBody`   | 点云变换，雷达到body                                         |
+| 重载函数`pointDistance`     | 点到原点，两点之间的距离                                     |
+| `allocateMemory`            | 初始化存储空间                                               |
+| `EulerToQuat`               | 欧拉角转四元数                                               |
+| `getCurPose`                | 当前帧的位姿，并赋值到`transformTobeMapped[6]`，RPY,XYZ      |
+| `visualizeLoopClosure`      | visualization_msgs::msg::MarkerArray markerArray;，就发布这玩意 |
+| `saveFrame`                 | 关键帧判断，和上一帧的相对变换，角度或平移距离太小就不作为关键帧 |
+| `addOdomFactor`             | 添加激光里程计因子                                           |
+| `addLoopFactor`             | 添加闭环因子                                                 |
+| `saveKeyFramesAndFactor`    | 在图优化过程中处理关键帧的保存和因子的添加                   |
+| `recontructIKdTree`         | 根据当前的关键帧数据重建并更新 Kd-tree                       |
+| `correctPoses`              | 更新因子图中所有变量节点的位姿，也就是所有历史关键帧的位姿，更新里程计轨迹 |
+| `detectLoopClosureDistance` |                                                              |
+| `loopFindNearKeyframes`     | 提取key索引的关键帧前后相邻若干帧的关键帧特征点集合，降采样  |
+| `performLoopClosure`        |                                                              |
+| `trans2gtsamPose`           | 转化为`gtsam::Pose3`格式                                     |
+|                             |                                                              |
+|                             |                                                              |
+
+### addOdomFactor
+
+判断`cloudKeyPoses3D->points.empty()`
+
+- 对于第一帧，初始化先验因子。
+
+- 前一阵`poseFrom`当前帧`poseTo`
+
+> 这个噪声协方差是怎么确定的？
+
+```
+void addOdomFactor()
+{
+    if (cloudKeyPoses3D->points.empty())
+    {
+        // 第一帧初始化先验因子
+        gtsam::noiseModel::Diagonal::shared_ptr priorNoise = gtsam::noiseModel::Diagonal::Variances((gtsam::Vector(6) <<1e-12, 1e-12, 1e-12, 1e-12, 1e-12, 1e-12).finished()); // rad*rad, meter*meter   // indoor 1e-12, 1e-12, 1e-12, 1e-12, 1e-12, 1e-12    //  1e-2, 1e-2, M_PI*M_PI, 1e8, 1e8, 1e8
+        gtSAMgraph.add(gtsam::PriorFactor<gtsam::Pose3>(0, trans2gtsamPose(transformTobeMapped), priorNoise));
+        // 变量节点设置初始值
+        initialEstimate.insert(0, trans2gtsamPose(transformTobeMapped));
+    }
+    else
+    {
+        // 添加激光里程计因子
+        gtsam::noiseModel::Diagonal::shared_ptr odometryNoise = gtsam::noiseModel::Diagonal::Variances((gtsam::Vector(6) << 1e-6, 1e-6, 1e-6, 1e-4, 1e-4, 1e-4).finished());
+        gtsam::Pose3 poseFrom = pclPointTogtsamPose3(cloudKeyPoses6D->points.back()); /// pre
+        gtsam::Pose3 poseTo = trans2gtsamPose(transformTobeMapped);                   // cur
+        // 参数：前一帧id，当前帧id，前一帧与当前帧的位姿变换（作为观测值），噪声协方差
+        gtSAMgraph.add(gtsam::BetweenFactor<gtsam::Pose3>(cloudKeyPoses3D->size() - 1, cloudKeyPoses3D->size(), poseFrom.between(poseTo), odometryNoise));
+        // 变量节点设置初始值
+        initialEstimate.insert(cloudKeyPoses3D->size(), poseTo);
+    }
+}
+```
+
+### addLoopFactor
+
+闭环因子是用于图优化的约束，表示机器人在某个时刻回到了之前访问过的位置。这种约束帮助优化过程修正机器人的轨迹，消除累计的误差。闭环检测的目的是检测到这种回环并在图中添加相应的约束。
+
+```
+void addLoopFactor()
+{
+    if (loopIndexQueue.empty())
+        return;
+
+    // 闭环队列
+    for (int i = 0; i < (int)loopIndexQueue.size(); ++i)
+    {
+        // 闭环边对应两帧的索引
+        int indexFrom = loopIndexQueue[i].first; //   cur
+        int indexTo = loopIndexQueue[i].second;  //    pre
+        // 闭环边的位姿变换
+        gtsam::Pose3 poseBetween = loopPoseQueue[i];
+        gtsam::noiseModel::Diagonal::shared_ptr noiseBetween = loopNoiseQueue[i];
+        gtSAMgraph.add(gtsam::BetweenFactor<gtsam::Pose3>(indexFrom, indexTo, poseBetween, noiseBetween));
+    }
+
+    loopIndexQueue.clear();
+    loopPoseQueue.clear();
+    loopNoiseQueue.clear();
+    aLoopIsClosed = true;
+}
+```
+
+### saveKeyFramesAndFactor
+
+- `saveFrame()`判断两帧差别，太小的话不作为关键帧。
+
+- 添加因子
+
+  ```
+      // 激光里程计因子(from fast-lio),  输入的是frame_relative pose  帧间位姿(body 系下)
+      addOdomFactor();
+      // GPS因子 (UTM -> WGS84)
+      //addGPSFactor();
+      //addTurnFactor();
+      // 闭环因子 (rs-loop-detect)  基于欧氏距离的检测
+      addLoopFactor();
+  ```
+
+- 图优化更新，
+
+  ```
+      isam->update(gtSAMgraph, initialEstimate);
+      isam->update();
+      if (aLoopIsClosed == true) // 有回环因子，多update几次
+      {
+          isam->update();
+          isam->update();
+          isam->update();
+          isam->update();
+          isam->update();
+      }
+  ```
+
+  > 为什么有回环因子，要多更新几次？次数怎么确定的？
+
+- 清空因子图
+
+- 优化结果和当前帧位姿
+
+  ```
+      // 优化结果
+      isamCurrentEstimate = isam->calculateBestEstimate();
+      // 当前帧位姿结果
+      latestEstimate = isamCurrentEstimate.at<gtsam::Pose3>(isamCurrentEstimate.size() - 1);
+  ```
+
+- 将新关键帧放入队列，`cloudKeyPoses3D`和`cloudKeyPoses6D`
+
+  > 为什么要分为3D和6D
+
+- 更新状态量
+
+- 当前帧激光角点、平面点，降采样集合
+
+- `updatePath(thisPose6D);` //  可视化update后的path
+
+### recontructIKdTree
+
+1. **Kd-tree 初始化与输入数据准备**：
+
+   - 创建一个 Kd-tree (`kdtreeGlobalMapPoses`) 用于存储全局关键帧位姿数据。
+
+   - 创建多个点云对象：`subMapKeyPoses`、`subMapKeyPosesDS`、`subMapKeyFrames` 和 `subMapKeyFramesDS`，用于存储子地图的关键帧位姿和对应的特征点云数据。
+
+2. **搜索附近关键帧**：
+
+   - 使用 `kdtreeGlobalMapPoses->radiusSearch` 在全局地图中查找与当前关键帧相邻的关键帧。找到的相邻关键帧会被存储在 `subMapKeyPoses` 中。
+
+3. **降采样**：
+
+   - 使用 `pcl::VoxelGrid` 进行降采样。首先对 `subMapKeyPoses` 进行降采样，生成 `subMapKeyPosesDS`，
+   - 然后根据降采样后的关键帧位姿 (`subMapKeyPosesDS`)，提取对应的局部地图特征点云 (`subMapKeyFrames`)，
+   - 并对其进行降采样，最终生成 `subMapKeyFramesDS`，用于后续的 Kd-tree 重建。
+
+4. **构建 Kd-tree**：
+   - 使用subMapKeyFramesDS，`重新构建 Kd-tree`，调用 ikdtree.reconstruct(subMapKeyFramesDS->points) 来完成。
+
+
+5. **更新与输出信息**：、
+   - 输出 Kd-tree 的大小和从地图中提取到的特征点数量。
+
+
+每次更新 `updateKdtreeCount`。加一
+
+### correctPoses()
+
+1. **检查是否有关键帧**：如果 `cloudKeyPoses3D` 中没有点云数据，直接返回。
+
+2. **闭环检测**：如果闭环已被检测到 (`aLoopIsClosed == true`)，则执行以下操作：
+
+   - **清空里程计轨迹**：`globalPath.poses.clear()` 清空当前的里程计轨迹。
+
+   - **更新因子图中所有变量节点的位姿**：
+     - 从 `isamCurrentEstimate` 中获取估计的位姿，并更新 `cloudKeyPoses3D` 和 `cloudKeyPoses6D` 中的关键帧位姿。
+     - `cloudKeyPoses3D` 存储平移信息，`cloudKeyPoses6D` 存储平移和旋转（姿态）信息。
+
+   - **更新里程计轨迹**：调用 `updatePath()` 更新轨迹。
+
+   - **重建局部地图并重建 Kd 树**：调用 `recontructIKdTree()` 清空局部地图，并重建 Kd 树。
+
+   - **重置闭环检测标志**：将 `aLoopIsClosed` 设置为 `false`，表示当前闭环已处理。
+
+### detectLoopClosureDistance
+
+1. **跳过已处理的关键帧**：
+   - 如果当前关键帧（`loopKeyCur`）已经存在于 `loopIndexContainer` 中（表示已经添加过闭环信息），则直接返回 `false`，跳过闭环检测。
+2. **查找历史关键帧中距离当前关键帧最近的帧**：
+   - 使用 `kdtreeHistoryKeyPoses` 对历史关键帧构建一个 Kd 树，以加速查找。
+   - 使用 `radiusSearch` 函数根据距离和半径 `historyKeyframeSearchRadius` 查找与当前关键帧最接近的关键帧。
+3. **过滤掉时间差过小的候选帧**：
+   - 在候选的历史关键帧中，使用时间差过滤条件（`historyKeyframeSearchTimeDiff`）来确保选择的候选帧与当前关键帧的时间相差较远，避免选择过于接近的帧。
+4. **返回找到的回环关键帧的 ID**：
+   - 如果找到符合条件的回环帧，返回当前关键帧和回环帧的 ID，供后续使用。
+5. **返回 `false`**：
+   - 如果没有找到合适的回环帧，或者当前帧和回环帧相同，则返回 `false`
+
+### loopFindNearKeyframes
+
+1. **清空输入点云**：首先清空 `nearKeyframes`，准备存储提取的关键帧特征点集合。
+2. **获取关键帧集合大小**：
+   - `cloudSize`：表示关键帧位姿的集合大小。
+   - `surfcloud_keyframes_size`：表示特征点云集合 `surfCloudKeyFrames` 的大小。
+3. **提取关键帧特征点集合**：
+   - 根据给定的 `key` 和 `searchNum`，从当前关键帧向前和向后查找相邻的关键帧。总共查找 `2*searchNum + 1` 帧的关键帧特征点。
+   - 使用 `transformPointCloud` 将每一帧的点云通过当前关键帧的位姿进行转换（从局部坐标系转换到全局坐标系）。
+   - 默认使用 `surfCloudKeyFrames` 中的点云，因为 `fast-lio` 没有进行特征提取，直接使用 `surfCloud` 点云。
+4. **检查是否有找到有效点云**：如果没有找到任何有效的关键帧点云（`nearKeyframes` 为空），则返回。
+5. **降采样**：
+   - 使用 `pcl::VoxelGrid` 进行降采样操作，减少点云中的点数，`downSizeFilterICP` 是降采样滤波器。
+   - 降采样后的点云存储在 `cloud_temp` 中，并将结果赋值回 `nearKeyframes`。
+
+### performLoopClosure
+
+1. **检查是否有关键帧**：如果没有任何关键帧，函数直接返回。
+
+2. **获取当前关键帧的历史数据**：使用 `mtx.lock()` 和 `mtx.unlock()` 保护共享资源，确保线程安全。将当前的 `cloudKeyPoses3D` 和 `cloudKeyPoses6D` 数据拷贝到 `copy_cloudKeyPoses3D` 和 `copy_cloudKeyPoses6D` 中。
+
+3. **检测回环闭合**：通过 `detectLoopClosureDistance()` 函数找到与当前关键帧距离最小且时间相隔较远的历史关键帧作为候选回环帧。
+
+4. **提取并降采样关键帧点云**：
+
+   - 调用 `loopFindNearKeyframes()` 
+
+   - 发布闭环匹配关键帧局部map
+
+     > 这是怎么查询的？？？里面好像没看到特征点提取的过程呀
+
+5. **ICP匹配**：通过ICP算法进行当前关键帧与历史关键帧的点云匹配。如果匹配收敛且匹配误差小于阈值，则继续进行后续处理。
+
+   ```
+       // ICP Settings
+       pcl::IterativeClosestPoint<PointType, PointType> icp;
+       icp.setMaxCorrespondenceDistance(150); // giseop , use a value can cover 2*historyKeyframeSearchNum range in meter
+       icp.setMaximumIterations(100);
+       icp.setTransformationEpsilon(1e-6);
+       icp.setEuclideanFitnessEpsilon(1e-6);
+       icp.setRANSACIterations(0);
+   
+       // scan-to-map，调用icp匹配
+       icp.setInputSource(cureKeyframeCloud);
+       icp.setInputTarget(prevKeyframeCloud);
+       pcl::PointCloud<PointType>::Ptr unused_result(new pcl::PointCloud<PointType>());
+       icp.align(*unused_result);
+   
+       // 未收敛，或者匹配不够好
+       if (icp.hasConverged() == false || icp.getFitnessScore() > historyKeyframeFitnessScore)
+           return;
+   
+       std::cout << "icp  success  " << std::endl;
+   ```
+
+6. **发布闭环优化后的点云**：如果匹配成功，则根据ICP计算的最终变换，发布闭环优化后的当前关键帧点云。
+
+7. **计算闭环优化前后的位姿变化**：通过ICP优化的变换计算当前帧和闭环帧的相对位姿变化，并将结果保存到 `loopPoseQueue` 中。
+
+8. **更新回环因子**：
+
+   ```
+       mtx.lock();
+       loopIndexQueue.push_back(make_pair(loopKeyCur, loopKeyPre));
+       loopPoseQueue.push_back(poseFrom.between(poseTo));
+       loopNoiseQueue.push_back(constraintNoise);
+       mtx.unlock();
+   ```
+
+9. **存储回环信息**：使用 `loopIndexContainer` 存储当前关键帧与闭环关键帧的索引对，确保不会重复进行回环检测。
+
+> 这些东西会清除吗。
+>
+> ```
+>     // 添加闭环因子需要的数据
+>     mtx.lock();
+>     loopIndexQueue.push_back(make_pair(loopKeyCur, loopKeyPre));
+>     loopPoseQueue.push_back(poseFrom.between(poseTo));
+>     loopNoiseQueue.push_back(constraintNoise);
+>     mtx.unlock();
+> 
+>     loopIndexContainer[loopKeyCur] = loopKeyPre; //   使用hash map 存储回环对
+> ```
+
+### loopClosureThread
+
+```
+    void loopClosureThread()
+    {
+        if (loopClosureEnableFlag == false)
+        {
+            std::cout << "loopClosureEnableFlag   ==  false " << endl;
+            return;
+        }
+
+        std::cout << "loopClosureThread" << std::endl;
+        performLoopClosure(pubHistoryKeyFrames, pubIcpKeyFrames);   //  回环检测
+        visualizeLoopClosure(pubLoopConstraintEdge); // rviz展示闭环边
+        
+    }
+```
+
+### publish_path
+
+### publish_path_update
+
+### 调用闭环线程
+
+就是设置了一个定时器，200ms执行一次。
+
+```
+
+        auto loopClosure_period_ms = std::chrono::milliseconds(static_cast<int64_t>(1000.0 / 5.0));
+        loopClosure_timer_ = rclcpp::create_timer(this, this->get_clock(), loopClosure_period_ms, std::bind(&LaserMappingNode::loopClosureThread, this));
+        
+        map_save_srv_ = this->create_service<buildmap::srv::SaveMap>("savemap", std::bind(&LaserMappingNode::map_save_callback, this, std::placeholders::_1, std::placeholders::_2));
+```
+
+> 有个问题，在哪里启动的线程呢？？
+
+## 雷达驱动
+
+- 思路一：[数据循环方面存在性能问题](https://github.com/Livox-SDK/Livox-SDK2/issues/22#issuecomment-1465588446)看`Driver2`和`ros2_driver`的区别。
+  - 看了没啥区别呀
+
+- 思路二：[其中的数据有一部分丢了](https://github.com/Livox-SDK/livox_ros_driver2/issues/56)
+  - ros2_driver中没有找到类似的呀
+- 思路三：[关于FillPointsToCustomMsg函数的思考](https://github.com/Livox-SDK/livox_ros2_driver/issues/39)
+
+# 2025/01/14
+
+> - 看动手学强化学习
+> - 重读3D Occ论文综述
+
+# 2025/01/15
+
+> - 继续看，修改的回环检测部分的代码。继续总结到01/13的笔记中。
+> - 等书到以后，复习动手学强化学习基础篇
+
+安装一个`pycharm`
+
+[保姆教程](https://blog.csdn.net/m0_74115845/article/details/142035764)
+
+# 2025/01/16
+
+> - 上午仍然是看雷达驱动，很奇怪，不知道为不同电脑上，lidar的频率不一样。跟厂家汇报了下
+> - 复习动手学强化学习
+> - 看了两篇论文
+>   - `LTA-OM`：更偏重于多个session的对齐
+>   - `LT-mappe`：这里有关于移除地图中不一样的地方。
+
+# 2025/01/17
+
+> - 复习一下，MPC，大致看一下陈虹的书。
+
+在 [Ubuntu 22.04 LTS](https://www.yundongfang.com/Yuntag/ubuntu-22-04-lts) Jammy Jellyfish 上[安装 Foxit PDF Reader](https://www.yundongfang.com/Yuntag/安装-foxit-pdf-reader)，，[教程](https://www.yundongfang.com/Yun5653.html)
