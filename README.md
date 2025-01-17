@@ -1103,5 +1103,101 @@ void addLoopFactor()
 # 2025/01/17
 
 > - 复习一下，MPC，大致看一下陈虹的书。
+> - 运行LT-SLAM
+> - 使用SC回环检测
 
 在 [Ubuntu 22.04 LTS](https://www.yundongfang.com/Yuntag/ubuntu-22-04-lts) Jammy Jellyfish 上[安装 Foxit PDF Reader](https://www.yundongfang.com/Yuntag/安装-foxit-pdf-reader)，，[教程](https://www.yundongfang.com/Yun5653.html)
+
+## LT-SLAM教程
+
+> 首先看这个！！！！！！！！！！！！！！！！！！！先创好架构
+>
+> ![image-20250117155258713](assets/image-20250117155258713.png)
+
+### 数据准备
+
+1. 准备数据
+
+   ![image-20250117100737231](assets/image-20250117100737231.png)
+
+2. [file_player_mulran](https://github.com/RPM-Robotics-Lab/file_player_mulran),下载这个,就是用来播放数据集，
+
+   - ```
+     source devel/setup.bash
+     roslaunch file_player file_player.launch
+     ```
+
+   - 直接打开，`load`![image-20250117101556967](assets/image-20250117101556967.png)
+
+3. [SC-LIO-SAM](https://github.com/gisbi-kim/SC-LIO-SAM)，
+
+   - 修改一下文件保存的路径，`params_mulran.yaml`文件,路径设为
+
+     - ![image-20250117104358727](assets/image-20250117104358727.png)
+
+   - 启动建图
+
+     ```
+     roslaunch lio_sam run_mulran.launch 
+     ```
+
+     `file_player`播放即可，
+
+     注：对于第一个数据集，先暂停一下，看看文件是否正确存储。
+
+4. 对于01和02两个轨迹，起始位置不同，轨迹也没对齐，**LT-SLAM目标是对齐他们**
+
+   ![image-20250117110015174](assets/image-20250117110015174.png)
+
+### 合并轨迹
+
+运行lLT-SLAM
+
+- 新建一个`data_ltslam/0102`，修改序列数据库的路径![image-20250117110932514](assets/image-20250117110932514.png)
+
+- 运行
+
+  ```
+  roslaunch ltslam run.launch
+  ```
+
+- 成功合并两条轨迹，使用半径搜索![image-20250117112042105](assets/image-20250117112042105.png)
+
+**检查**
+
+需要来两个文件，"_central_aft_intersession_loops.txt"，central意思是他们在共享坐标系下。同样可以在cloudcompare下打开，
+
+点云地图检查,修改以下文件
+
+```
+/home/wenming/ltslam/catkin_scliosam/src/SC-LIO-SAM/tools/python/makeMergedMap.py
+```
+
+```
+data_dir = "/home/wenming/ltslam/data_parsed/01/" # should end with / 
+scan_idx_range_to_stack = [0, len(scan_files)] # if you want a whole map, use [0, len(scan_files)]
+
+f = open(data_dir+"01_central_aft_intersession_loops.txt", 'r')
+```
+
+运行脚本文件
+
+```
+python3 makeMergedMap.py 
+```
+
+一直报错，[解决](https://blog.csdn.net/Tammy_lzh/article/details/133934959)
+
+### 地图去除
+
+修改配置文件
+
+![image-20250117155111088](assets/image-20250117155111088.png)
+
+运行
+
+```
+roslaunch removert run_ltmapper.launch 
+```
+
+报超出范围的错误，因为两个pcd的scans数量不同，用的多的那个作为循环的。
