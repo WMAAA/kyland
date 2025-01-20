@@ -1105,6 +1105,7 @@ void addLoopFactor()
 > - 复习一下，MPC，大致看一下陈虹的书。
 > - 运行LT-SLAM
 > - 使用SC回环检测
+>   - 几乎是检查不到回环。
 
 在 [Ubuntu 22.04 LTS](https://www.yundongfang.com/Yuntag/ubuntu-22-04-lts) Jammy Jellyfish 上[安装 Foxit PDF Reader](https://www.yundongfang.com/Yuntag/安装-foxit-pdf-reader)，，[教程](https://www.yundongfang.com/Yun5653.html)
 
@@ -1201,3 +1202,40 @@ roslaunch removert run_ltmapper.launch
 ```
 
 报超出范围的错误，因为两个pcd的scans数量不同，用的多的那个作为循环的。
+
+# 2025/01/20
+
+> 1. 读SC论文。
+> 2. 读Fast-lio-slam中位姿图优化的代码。
+> 3. 看一下官网GTSAM
+
+## Fast-lio-slam代码
+
+scLoopICPBufscLoopICPBuf六个`thread`，
+
+### process_pg
+
+<img src="assets/image-20250120142106662.png" alt="image-20250120142106662" />
+
+### process_lcd
+
+![image-20250120142846303](assets/image-20250120142846303.png)
+
+### performSCLoopClosure
+
+![image-20250120143919071](assets/image-20250120143919071.png)
+
+### process_icp
+
+![image-20250120145356297](assets/image-20250120145356297.png)
+
+### doICPVirtualRelative
+
+![image-20250120152853901](assets/image-20250120152853901.png)
+
+### process_isam
+
+![image-20250120150022664](assets/image-20250120150022664.png)
+
+## GTSAM相关
+
